@@ -1,14 +1,16 @@
 #![feature(get_mut_unchecked)]
+#![feature(map_first_last)]
 #[macro_use]
 extern crate lazy_static;
 use std::{
+    cmp,
     collections::BTreeMap,
     ops::Deref,
     sync::{
         mpsc::{channel, Sender},
         Arc, Mutex, Weak,
     },
-    thread,
+    thread, time,
 };
 
 #[cfg(test)]
@@ -28,11 +30,8 @@ impl<X: 'static + Send + Sync> ArcGc<X> {
         WeakArcGc(Arc::downgrade(&self.0))
     }
     pub fn mark_allow_cycles(&self) {
-        ALLOW_CYCLES_MARKER
-            .lock()
-            .unwrap()
-            .send(Box::new(self.downgrade()))
-            .unwrap();
+        let x = Box::new(self.downgrade());
+        ALLOW_CYCLES_MARKER.lock().unwrap().send(x).unwrap();
     }
 }
 impl<X> Deref for ArcGc<X> {
@@ -81,6 +80,40 @@ lazy_static! {
         BTreeMap<usize, Box<dyn AnyWeakArcGc>>
     )> = Mutex::new((BTreeMap::new(), BTreeMap::new()));
     static ref ALLOW_CYCLES_MARKER: Mutex<Sender<Box<dyn AnyWeakArcGc>>> = {
+        thread::spawn(move || {
+            let mut sleep_time: u64 = 1;
+            loop {
+                let mut did_some_works = false;
+                {
+                    let mut locked = ALLOW_CYCLES_SET.lock().unwrap();
+                    if let Some(entry) = locked.0.first_entry() {
+                        let (key, val) = entry.remove_entry();
+                        if let Some(val_arc) = val.any_upgrade() {
+                            let addr = val_arc.address();
+                            assert_eq!(addr, key);
+                            locked.1.insert(val_arc.address(), val);
+                        }
+                        did_some_works = true;
+                    } else {
+                        if !locked.1.is_empty() {
+                            let mut new_locked0 = BTreeMap::new();
+                            new_locked0.append(&mut locked.1);
+                            assert!(locked.1.is_empty());
+                            locked.0 = new_locked0;
+                            assert!(!locked.0.is_empty());
+                            did_some_works = true;
+                        }
+                    }
+                }
+                if did_some_works {
+                    sleep_time >>= 1;
+                } else {
+                    sleep_time <<= 1;
+                }
+                sleep_time = cmp::min(cmp::max(sleep_time, 1), 256);
+                thread::sleep(time::Duration::from_millis(sleep_time));
+            }
+        });
         let (sender, receiver) = channel::<Box<dyn AnyWeakArcGc>>();
         thread::spawn(move || loop {
             let x = receiver.recv().unwrap();
