@@ -43,11 +43,16 @@ impl<X> Deref for Gc<X> {
         }
     }
 }
-pub unsafe trait AnyGc: Send + Sync {
+impl<X: TraceGc> TraceGc for Gc<X> {
+    fn trace_as_vec(&self) -> Vec<Box<dyn AnyGc>> {
+        self.deref().trace_as_vec()
+    }
+}
+pub unsafe trait AnyGc: Send + Sync + TraceGc {
     unsafe fn destory(&self);
     fn address(&self) -> usize;
 }
-unsafe impl<X: Send + Sync> AnyGc for Gc<X> {
+unsafe impl<X: Send + Sync + TraceGc> AnyGc for Gc<X> {
     unsafe fn destory(&self) {
         *Arc::get_mut_unchecked(&mut self.0.clone()) = None;
     }
@@ -71,7 +76,7 @@ impl<X: Send + Sync> WeakGc<X> {
 pub unsafe trait AnyWeakGc: Send + Sync {
     fn any_upgrade(&self) -> Option<Box<dyn AnyGc>>;
 }
-unsafe impl<X: 'static + Send + Sync> AnyWeakGc for WeakGc<X> {
+unsafe impl<X: 'static + Send + Sync + TraceGc> AnyWeakGc for WeakGc<X> {
     fn any_upgrade(&self) -> Option<Box<dyn AnyGc>> {
         Some(Box::new(self.upgrade()?))
     }
