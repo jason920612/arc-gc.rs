@@ -21,20 +21,20 @@ mod tests {
     }
 }
 
-pub struct ArcGc<X>(Arc<Option<X>>);
-impl<X: 'static + Send + Sync> ArcGc<X> {
+pub struct Gc<X>(Arc<Option<X>>);
+impl<X: 'static + Send + Sync + TraceGc> Gc<X> {
     pub fn new(x: X) -> Self {
-        ArcGc(Arc::new(Some(x)))
+        Gc(Arc::new(Some(x)))
     }
-    pub fn downgrade(&self) -> WeakArcGc<X> {
-        WeakArcGc(Arc::downgrade(&self.0))
+    pub fn downgrade(&self) -> WeakGc<X> {
+        WeakGc(Arc::downgrade(&self.0))
     }
     pub fn mark_allow_cycles(&self) {
         let x = Box::new(self.downgrade());
         ALLOW_CYCLES_MARKER.lock().unwrap().send(x).unwrap();
     }
 }
-impl<X> Deref for ArcGc<X> {
+impl<X> Deref for Gc<X> {
     type Target = X;
     fn deref(&self) -> &Self::Target {
         match &*self.0 {
@@ -43,11 +43,11 @@ impl<X> Deref for ArcGc<X> {
         }
     }
 }
-pub unsafe trait AnyArcGc: Send + Sync {
+pub unsafe trait AnyGc: Send + Sync {
     unsafe fn destory(&self);
     fn address(&self) -> usize;
 }
-unsafe impl<X: Send + Sync> AnyArcGc for ArcGc<X> {
+unsafe impl<X: Send + Sync> AnyGc for Gc<X> {
     unsafe fn destory(&self) {
         *Arc::get_mut_unchecked(&mut self.0.clone()) = None;
     }
@@ -56,20 +56,23 @@ unsafe impl<X: Send + Sync> AnyArcGc for ArcGc<X> {
         pointer as usize
     }
 }
-pub struct WeakArcGc<X>(Weak<Option<X>>);
-impl<X: Send + Sync> WeakArcGc<X> {
-    pub fn new() -> WeakArcGc<X> {
-        WeakArcGc(Weak::new())
+pub trait TraceGc {
+    fn trace_as_vec(&self) -> Vec<Box<dyn AnyGc>>;
+}
+pub struct WeakGc<X>(Weak<Option<X>>);
+impl<X: Send + Sync> WeakGc<X> {
+    pub fn new() -> WeakGc<X> {
+        WeakGc(Weak::new())
     }
-    pub fn upgrade(&self) -> Option<ArcGc<X>> {
-        Some(ArcGc(self.0.upgrade()?))
+    pub fn upgrade(&self) -> Option<Gc<X>> {
+        Some(Gc(self.0.upgrade()?))
     }
 }
-pub unsafe trait AnyWeakArcGc: Send + Sync {
-    fn any_upgrade(&self) -> Option<Box<dyn AnyArcGc>>;
+pub unsafe trait AnyWeakGc: Send + Sync {
+    fn any_upgrade(&self) -> Option<Box<dyn AnyGc>>;
 }
-unsafe impl<X: 'static + Send + Sync> AnyWeakArcGc for WeakArcGc<X> {
-    fn any_upgrade(&self) -> Option<Box<dyn AnyArcGc>> {
+unsafe impl<X: 'static + Send + Sync> AnyWeakGc for WeakGc<X> {
+    fn any_upgrade(&self) -> Option<Box<dyn AnyGc>> {
         Some(Box::new(self.upgrade()?))
     }
 }
@@ -94,10 +97,10 @@ macro_rules! spawn_auto_sleep_loop_thread {
 }
 lazy_static! {
     static ref ALLOW_CYCLES_SET: Mutex<(
-        BTreeMap<usize, Box<dyn AnyWeakArcGc>>,
-        BTreeMap<usize, Box<dyn AnyWeakArcGc>>
+        BTreeMap<usize, Box<dyn AnyWeakGc>>,
+        BTreeMap<usize, Box<dyn AnyWeakGc>>
     )> = Mutex::new((BTreeMap::new(), BTreeMap::new()));
-    static ref ALLOW_CYCLES_MARKER: Mutex<Sender<Box<dyn AnyWeakArcGc>>> = {
+    static ref ALLOW_CYCLES_MARKER: Mutex<Sender<Box<dyn AnyWeakGc>>> = {
         spawn_auto_sleep_loop_thread!(did_some_works, {
             let mut locked = ALLOW_CYCLES_SET.lock().unwrap();
             if let Some(entry) = locked.0.first_entry() {
@@ -119,7 +122,7 @@ lazy_static! {
                 }
             }
         });
-        let (sender, receiver) = channel::<Box<dyn AnyWeakArcGc>>();
+        let (sender, receiver) = channel::<Box<dyn AnyWeakGc>>();
         thread::spawn(move || loop {
             let x = receiver.recv().unwrap();
             let x_arc = x.any_upgrade();
