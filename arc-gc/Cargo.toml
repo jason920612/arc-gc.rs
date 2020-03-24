@@ -1,0 +1,12 @@
+[package]
+name = "arc-gc"
+version = "0.1.0"
+authors = ["ㄗㄠˋ ㄑㄧˊ <tsao-chi@the-lingo.org>"]
+edition = "2018"
+license = "MPL-2.0"
+description = "(WIP) Arc with background threads to sweep cycles"
+repository = "https://github.com/tsao-chi/arc-gc.rs.git"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
