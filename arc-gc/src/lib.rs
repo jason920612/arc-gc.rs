@@ -74,20 +74,22 @@ unsafe impl<X: 'static + Send + Sync> AnyWeakArcGc for WeakArcGc<X> {
     }
 }
 
-macro_rules! auto_sleep_loop {
+macro_rules! spawn_auto_sleep_loop_thread {
     ($didworks:ident,$blk:block) => {
-        let mut sleep_time: u64 = 1;
-        loop {
-            let mut $didworks = false;
-            $blk;
-            if $didworks {
-                sleep_time >>= 1;
-            } else {
-                sleep_time <<= 1;
+        thread::spawn(move || loop {
+            let mut sleep_time: u64 = 1;
+            loop {
+                let mut $didworks = false;
+                $blk;
+                if $didworks {
+                    sleep_time >>= 1;
+                } else {
+                    sleep_time <<= 1;
+                }
+                sleep_time = cmp::min(cmp::max(sleep_time, 1), 256);
+                thread::sleep(time::Duration::from_millis(sleep_time));
             }
-            sleep_time = cmp::min(cmp::max(sleep_time, 1), 256);
-            thread::sleep(time::Duration::from_millis(sleep_time));
-        }
+        })
     };
 }
 lazy_static! {
@@ -96,28 +98,26 @@ lazy_static! {
         BTreeMap<usize, Box<dyn AnyWeakArcGc>>
     )> = Mutex::new((BTreeMap::new(), BTreeMap::new()));
     static ref ALLOW_CYCLES_MARKER: Mutex<Sender<Box<dyn AnyWeakArcGc>>> = {
-        thread::spawn(move || {
-            auto_sleep_loop!(did_some_works, {
-                let mut locked = ALLOW_CYCLES_SET.lock().unwrap();
-                if let Some(entry) = locked.0.first_entry() {
-                    let (key, val) = entry.remove_entry();
-                    if let Some(val_arc) = val.any_upgrade() {
-                        let addr = val_arc.address();
-                        assert_eq!(addr, key);
-                        locked.1.insert(val_arc.address(), val);
-                    }
-                    did_some_works = true;
-                } else {
-                    if !locked.1.is_empty() {
-                        let mut new_locked0 = BTreeMap::new();
-                        new_locked0.append(&mut locked.1);
-                        assert!(locked.1.is_empty());
-                        locked.0 = new_locked0;
-                        assert!(!locked.0.is_empty());
-                        did_some_works = true;
-                    }
+        spawn_auto_sleep_loop_thread!(did_some_works, {
+            let mut locked = ALLOW_CYCLES_SET.lock().unwrap();
+            if let Some(entry) = locked.0.first_entry() {
+                let (key, val) = entry.remove_entry();
+                if let Some(val_arc) = val.any_upgrade() {
+                    let addr = val_arc.address();
+                    assert_eq!(addr, key);
+                    locked.1.insert(val_arc.address(), val);
                 }
-            });
+                did_some_works = true;
+            } else {
+                if !locked.1.is_empty() {
+                    let mut new_locked0 = BTreeMap::new();
+                    new_locked0.append(&mut locked.1);
+                    assert!(locked.1.is_empty());
+                    locked.0 = new_locked0;
+                    assert!(!locked.0.is_empty());
+                    did_some_works = true;
+                }
+            }
         });
         let (sender, receiver) = channel::<Box<dyn AnyWeakArcGc>>();
         thread::spawn(move || loop {
