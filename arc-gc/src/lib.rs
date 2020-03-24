@@ -43,6 +43,11 @@ impl<X> Deref for Gc<X> {
         }
     }
 }
+impl<X> Clone for Gc<X> {
+    fn clone(&self) -> Self {
+        Gc(self.0.clone())
+    }
+}
 impl<X: TraceGc> TraceGc for Gc<X> {
     fn trace_as_vec(&self) -> Vec<Box<dyn AnyGc>> {
         let this: &X = &*self;
@@ -74,16 +79,25 @@ impl<X: Send + Sync> WeakGc<X> {
         Some(Gc(self.0.upgrade()?))
     }
 }
+impl<X> Clone for WeakGc<X> {
+    fn clone(&self) -> Self {
+        WeakGc(self.0.clone())
+    }
+}
 pub unsafe trait AnyWeakGc: Send + Sync {
-    fn any_upgrade(&self) -> Option<Box<dyn AnyGc>>;
+    fn upgrade_as_any(&self) -> Option<Box<dyn AnyGc>>;
+    fn clone_as_any(&self) -> Box<dyn AnyWeakGc>;
 }
 unsafe impl<X: 'static + Send + Sync + TraceGc> AnyWeakGc for WeakGc<X> {
-    fn any_upgrade(&self) -> Option<Box<dyn AnyGc>> {
+    fn upgrade_as_any(&self) -> Option<Box<dyn AnyGc>> {
         Some(Box::new(self.upgrade()?))
+    }
+    fn clone_as_any(&self) -> Box<dyn AnyWeakGc> {
+        Box::new(self.clone())
     }
 }
 
-macro_rules! spawn_auto_sleep_loop_thread {
+/*macro_rules! spawn_auto_sleep_loop_thread {
     ($min:expr,$max:expr,$didworks:ident,$blk:block) => {
         thread::spawn(move || loop {
             let mut sleep_time: u64 = 1;
@@ -100,23 +114,22 @@ macro_rules! spawn_auto_sleep_loop_thread {
             }
         })
     };
-}
+}*/
 lazy_static! {
     static ref ALLOW_CYCLES_SET: Mutex<(
         BTreeMap<usize, Box<dyn AnyWeakGc>>,
         BTreeMap<usize, Box<dyn AnyWeakGc>>
     )> = Mutex::new((BTreeMap::new(), BTreeMap::new()));
     static ref ALLOW_CYCLES_MARKER: Mutex<Sender<Box<dyn AnyWeakGc>>> = {
-        spawn_auto_sleep_loop_thread!(1, 64, did_some_works, {
+        thread::spawn(move || {
             let mut locked = ALLOW_CYCLES_SET.lock().unwrap();
             if let Some(entry) = locked.0.first_entry() {
                 let (key, val) = entry.remove_entry();
-                if let Some(val_arc) = val.any_upgrade() {
+                if let Some(val_arc) = val.upgrade_as_any() {
                     let addr = val_arc.address();
                     assert_eq!(addr, key);
                     locked.1.insert(val_arc.address(), val);
                 }
-                did_some_works = true;
             } else {
                 if !locked.1.is_empty() {
                     let mut new_locked0 = BTreeMap::new();
@@ -124,24 +137,20 @@ lazy_static! {
                     assert!(locked.1.is_empty());
                     locked.0 = new_locked0;
                     assert!(!locked.0.is_empty());
-                    did_some_works = true;
                 }
             }
+            panic!("TODO");
         });
         let (sender, receiver) = channel::<Box<dyn AnyWeakGc>>();
-        thread::spawn(move || {
-            let d = time::Duration::from_millis(100);
-            loop {
-                if let Ok(x) = receiver.recv_timeout(d) {
-                    let x_arc = x.any_upgrade();
-                    if let Some(x_arc) = x_arc {
-                        ALLOW_CYCLES_SET
-                            .lock()
-                            .unwrap()
-                            .0
-                            .insert(x_arc.address(), x);
-                    }
-                }
+        thread::spawn(move || loop {
+            let x = receiver.recv().unwrap();
+            let x_arc = x.upgrade_as_any();
+            if let Some(x_arc) = x_arc {
+                ALLOW_CYCLES_SET
+                    .lock()
+                    .unwrap()
+                    .0
+                    .insert(x_arc.address(), x);
             }
         });
         Mutex::new(sender)
