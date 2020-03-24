@@ -45,7 +45,8 @@ impl<X> Deref for Gc<X> {
 }
 impl<X: TraceGc> TraceGc for Gc<X> {
     fn trace_as_vec(&self) -> Vec<Box<dyn AnyGc>> {
-        self.deref().trace_as_vec()
+        let this: &X = &*self;
+        this.trace_as_vec()
     }
 }
 pub unsafe trait AnyGc: Send + Sync + TraceGc {
@@ -83,7 +84,7 @@ unsafe impl<X: 'static + Send + Sync + TraceGc> AnyWeakGc for WeakGc<X> {
 }
 
 macro_rules! spawn_auto_sleep_loop_thread {
-    ($didworks:ident,$blk:block) => {
+    ($min:expr,$max:expr,$didworks:ident,$blk:block) => {
         thread::spawn(move || loop {
             let mut sleep_time: u64 = 1;
             loop {
@@ -94,7 +95,7 @@ macro_rules! spawn_auto_sleep_loop_thread {
                 } else {
                     sleep_time <<= 1;
                 }
-                sleep_time = cmp::min(cmp::max(sleep_time, 1), 256);
+                sleep_time = cmp::min(cmp::max(sleep_time, $min), $max);
                 thread::sleep(time::Duration::from_millis(sleep_time));
             }
         })
@@ -106,7 +107,7 @@ lazy_static! {
         BTreeMap<usize, Box<dyn AnyWeakGc>>
     )> = Mutex::new((BTreeMap::new(), BTreeMap::new()));
     static ref ALLOW_CYCLES_MARKER: Mutex<Sender<Box<dyn AnyWeakGc>>> = {
-        spawn_auto_sleep_loop_thread!(did_some_works, {
+        spawn_auto_sleep_loop_thread!(1, 64, did_some_works, {
             let mut locked = ALLOW_CYCLES_SET.lock().unwrap();
             if let Some(entry) = locked.0.first_entry() {
                 let (key, val) = entry.remove_entry();
@@ -128,15 +129,19 @@ lazy_static! {
             }
         });
         let (sender, receiver) = channel::<Box<dyn AnyWeakGc>>();
-        thread::spawn(move || loop {
-            let x = receiver.recv().unwrap();
-            let x_arc = x.any_upgrade();
-            if let Some(x_arc) = x_arc {
-                ALLOW_CYCLES_SET
-                    .lock()
-                    .unwrap()
-                    .0
-                    .insert(x_arc.address(), x);
+        thread::spawn(move || {
+            let d = time::Duration::from_millis(100);
+            loop {
+                if let Ok(x) = receiver.recv_timeout(d) {
+                    let x_arc = x.any_upgrade();
+                    if let Some(x_arc) = x_arc {
+                        ALLOW_CYCLES_SET
+                            .lock()
+                            .unwrap()
+                            .0
+                            .insert(x_arc.address(), x);
+                    }
+                }
             }
         });
         Mutex::new(sender)
