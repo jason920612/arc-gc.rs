@@ -4,7 +4,11 @@ extern crate lazy_static;
 use std::{
     collections::BTreeMap,
     ops::Deref,
-    sync::{Arc, Weak},
+    sync::{
+        mpsc::{channel, Sender},
+        Arc, Mutex, Weak,
+    },
+    thread,
 };
 
 #[cfg(test)]
@@ -16,12 +20,19 @@ mod tests {
 }
 
 pub struct ArcGc<X>(Arc<Option<X>>);
-impl<X: Send + Sync> ArcGc<X> {
+impl<X: 'static + Send + Sync> ArcGc<X> {
     pub fn new(x: X) -> Self {
         ArcGc(Arc::new(Some(x)))
     }
     pub fn downgrade(&self) -> WeakArcGc<X> {
         WeakArcGc(Arc::downgrade(&self.0))
+    }
+    pub fn mark_allow_cycles(&self) {
+        ALLOW_CYCLES_MARKER
+            .lock()
+            .unwrap()
+            .send(Box::new(self.downgrade()))
+            .unwrap();
     }
 }
 impl<X> Deref for ArcGc<X> {
@@ -65,6 +76,23 @@ unsafe impl<X: 'static + Send + Sync> AnyWeakArcGc for WeakArcGc<X> {
 }
 
 lazy_static! {
-    static ref ALLOW_CYCLES_SET1: BTreeMap<usize, Box<dyn AnyWeakArcGc>> = BTreeMap::new();
-    static ref ALLOW_CYCLES_SET2: BTreeMap<usize, Box<dyn AnyWeakArcGc>> = BTreeMap::new();
+    static ref ALLOW_CYCLES_SET: Mutex<(
+        BTreeMap<usize, Box<dyn AnyWeakArcGc>>,
+        BTreeMap<usize, Box<dyn AnyWeakArcGc>>
+    )> = Mutex::new((BTreeMap::new(), BTreeMap::new()));
+    static ref ALLOW_CYCLES_MARKER: Mutex<Sender<Box<dyn AnyWeakArcGc>>> = {
+        let (sender, receiver) = channel::<Box<dyn AnyWeakArcGc>>();
+        thread::spawn(move || loop {
+            let x = receiver.recv().unwrap();
+            let x_arc = x.any_upgrade();
+            if let Some(x_arc) = x_arc {
+                ALLOW_CYCLES_SET
+                    .lock()
+                    .unwrap()
+                    .0
+                    .insert(x_arc.address(), x);
+            }
+        });
+        Mutex::new(sender)
+    };
 }
