@@ -4,7 +4,7 @@
 extern crate lazy_static;
 use std::{
     cmp,
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap, HashSet},
     ops::Deref,
     sync::{
         mpsc::{channel, Sender},
@@ -57,14 +57,18 @@ impl<X: TraceGc> TraceGc for Gc<X> {
 pub unsafe trait AnyGc: Send + Sync + TraceGc {
     unsafe fn destory(&self);
     fn address(&self) -> usize;
+    fn clone_as_any(&self) -> Box<dyn AnyGc>;
 }
-unsafe impl<X: Send + Sync + TraceGc> AnyGc for Gc<X> {
+unsafe impl<X: 'static + Send + Sync + TraceGc> AnyGc for Gc<X> {
     unsafe fn destory(&self) {
         *Arc::get_mut_unchecked(&mut self.0.clone()) = None;
     }
     fn address(&self) -> usize {
         let pointer: *const Option<X> = &*self.0;
         pointer as usize
+    }
+    fn clone_as_any(&self) -> Box<dyn AnyGc> {
+        Box::new(self.clone())
     }
 }
 pub trait TraceGc {
@@ -115,12 +119,45 @@ unsafe impl<X: 'static + Send + Sync + TraceGc> AnyWeakGc for WeakGc<X> {
         })
     };
 }*/
+fn mark_sweep(x: Box<dyn AnyGc>) {
+    let mut state = HashMap::new();
+    let mut x_history = HashSet::new();
+    x_history.insert(x.address());
+    mark_sweep_aux(&x, x_history, &mut state);
+    for (v_addr, (v, v_count)) in state.drain() {
+        panic!("TODO")
+    }
+}
+fn mark_sweep_aux<'x>(
+    x: &'x Box<dyn AnyGc>,
+    history: HashSet<usize>,
+    state: &'x mut HashMap<usize, (Box<dyn AnyGc>, usize)>,
+) {
+    for inner in x.trace_as_vec().into_iter() {
+        let inner_addr = inner.address();
+        if history.contains(&inner_addr) {
+            if let Some(elm) = state.get_mut(&inner_addr) {
+                elm.1 += 1
+            } else {
+                let a_none = state.insert(inner_addr, (inner.clone_as_any(), 1));
+                assert!(a_none.is_none());
+            }
+        }
+        if !state.contains_key(&inner_addr) {
+            let mut inner_history = history.clone();
+            let a_true = inner_history.insert(inner_addr);
+            assert!(a_true);
+            mark_sweep_aux(&inner, inner_history, state);
+        }
+    }
+}
 lazy_static! {
     static ref ALLOW_CYCLES_SET: Mutex<(
         BTreeMap<usize, Box<dyn AnyWeakGc>>,
         BTreeMap<usize, Box<dyn AnyWeakGc>>
     )> = Mutex::new((BTreeMap::new(), BTreeMap::new()));
     static ref ALLOW_CYCLES_MARKER: Mutex<Sender<Box<dyn AnyWeakGc>>> = {
+        let ms100 = time::Duration::from_millis(100);
         thread::spawn(move || {
             let mut locked = ALLOW_CYCLES_SET.lock().unwrap();
             if let Some(entry) = locked.0.first_entry() {
@@ -129,6 +166,8 @@ lazy_static! {
                     let addr = val_arc.address();
                     assert_eq!(addr, key);
                     locked.1.insert(val_arc.address(), val);
+                    drop(locked);
+                    mark_sweep(val_arc);
                 }
             } else {
                 if !locked.1.is_empty() {
@@ -137,9 +176,10 @@ lazy_static! {
                     assert!(locked.1.is_empty());
                     locked.0 = new_locked0;
                     assert!(!locked.0.is_empty());
+                } else {
+                    thread::sleep(ms100);
                 }
             }
-            panic!("TODO");
         });
         let (sender, receiver) = channel::<Box<dyn AnyWeakGc>>();
         thread::spawn(move || loop {
